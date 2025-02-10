@@ -185,8 +185,8 @@ impl HttpHandler for Handler {
 impl WebSocketHandler for Handler {}
 
 fn read_ca() -> RcgenAuthority {
-    let key = utils::read_bytes("./ca/ca.key").expect("读取密钥文件失败!");
-    let cert = utils::read_bytes("./ca/ca.cer").expect("读取证书文件失败!");
+    let key = utils::read_bytes("./ca/cthulhu.key").expect("读取密钥文件失败!");
+    let cert = utils::read_bytes("./ca/cthulhu.cer").expect("读取证书文件失败!");
 
     let mut private_key_bytes: &[u8] = &key;
     let mut ca_cert_bytes: &[u8] = &cert;

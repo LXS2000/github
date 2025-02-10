@@ -13,8 +13,7 @@ use time::ext::NumericalDuration;
 use time::OffsetDateTime;
 
 ///自签名生成一个CA证书
-pub fn generate_self_signed_cert_with_privkey(
-) -> Result<(Certificate, String, String), Box<dyn std::error::Error>> {
+pub fn generate_self_signed_cert_with_privkey() -> Result<(Certificate, String, String), Box<dyn std::error::Error>> {
     let mut params = CertificateParams::default();
     // Add the SAN we want to test the parsing for
 
@@ -79,7 +78,7 @@ pub fn signed_cert_with_ca(
     }
 
     params.not_before = OffsetDateTime::now_utc();
-    params.not_after = OffsetDateTime::now_utc() + Duration::from_secs(365 * 60 * 60 * 24);
+    params.not_after = OffsetDateTime::now_utc() + Duration::from_secs(365 * 60 * 60 * 24 * 10);
 
     let cert = Certificate::from_params(params)?;
 
@@ -100,7 +99,7 @@ pub fn gen_client(root_cert: &Certificate) -> Result<String, rcgen::RcgenError> 
     params.distinguished_name = dn;
 
     params.not_before = OffsetDateTime::now_utc();
-    params.not_after = OffsetDateTime::now_utc() + Duration::from_secs(365 * 60 * 60 * 24);
+    params.not_after = OffsetDateTime::now_utc() + Duration::from_secs(365 * 60 * 60 * 24 * 10);
 
     let cert = Certificate::from_params(params)?;
 
@@ -141,6 +140,13 @@ pub fn ca_gen(out_dir: &str) {
     let cer_path = format!("{out_dir}/cthulhu.cer");
     std::fs::write(&key_path, key.as_bytes()).unwrap();
     std::fs::write(&cer_path, pem.as_bytes()).unwrap();
+
     println!("private key output '{key_path}'");
     println!("certificate output '{key_path}'");
+}
+
+
+#[test]
+pub fn gen() {
+    ca_gen("./ca")
 }
