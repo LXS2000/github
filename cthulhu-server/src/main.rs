@@ -137,12 +137,12 @@ impl HttpHandler for Handler {
         }
         let uri = req.uri().clone();
         let version = req.version();
-        println!("req:{},{:?},{}", req.method(),&version, uri.to_string());
-        
+        println!("req:{},{:?},{}", req.method(), &version, uri.to_string());
+
         let headers = req.headers_mut();
 
         headers.append("mitm-uri", HeaderValue::from_str(&uri.to_string()).unwrap());
-        headers.append("mitm-version", HeaderValue::from_str(&format!("{:?}",version)).unwrap());
+        headers.append("mitm-version", HeaderValue::from_str(&format!("{:?}", version)).unwrap());
         let host_ = uri.host().unwrap();
         for Match {
             host,
@@ -185,8 +185,8 @@ impl HttpHandler for Handler {
 impl WebSocketHandler for Handler {}
 
 fn read_ca() -> RcgenAuthority {
-    let key = utils::read_bytes("./ca/cthulhu.key").expect("读取密钥文件失败!");
-    let cert = utils::read_bytes("./ca/cthulhu.cer").expect("读取证书文件失败!");
+    let key = utils::read_bytes("./ca/ca.key").expect("读取密钥文件失败!");
+    let cert = utils::read_bytes("./ca/ca.cer").expect("读取证书文件失败!");
 
     let mut private_key_bytes: &[u8] = &key;
     let mut ca_cert_bytes: &[u8] = &cert;

@@ -136,8 +136,8 @@ pub fn from_ca_cert_pem(pem: &str, key: &str) -> Result<Certificate, rcgen::Rcge
 pub fn ca_gen(out_dir: &str) {
     let (_, pem, key) = generate_self_signed_cert_with_privkey().unwrap();
     std::fs::create_dir_all(out_dir).unwrap();
-    let key_path = format!("{out_dir}/cthulhu.key");
-    let cer_path = format!("{out_dir}/cthulhu.cer");
+    let key_path = format!("{out_dir}/ca.key");
+    let cer_path = format!("{out_dir}/ca.cer");
     std::fs::write(&key_path, key.as_bytes()).unwrap();
     std::fs::write(&cer_path, pem.as_bytes()).unwrap();
 
