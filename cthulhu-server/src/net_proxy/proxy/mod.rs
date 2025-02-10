@@ -167,7 +167,7 @@ where
     CA: CertificateAuthority,
     H: HttpHandler,
     W: WebSocketHandler,
-    Fu: Future<Output = Client> + Send + Sync + 'static,
+    Fu: Future<Output=Client> + Send + Sync + 'static,
     P: Fn(SocketAddr, Uri) -> Fu + Send + 'static + Clone + Sync,
 {
     pub fn new(
@@ -188,7 +188,7 @@ where
         }
     }
 
-    pub async fn start<F: Future<Output = ()>>(self, shutdown_signal: F) -> Result<(), Error> {
+    pub async fn start<F: Future<Output=()>>(self, shutdown_signal: F) -> Result<(), Error> {
         let make_service = make_service_fn(move |conn: &AddrStream| {
             let ca = Arc::clone(&self.ca);
             let http_handler = (&self.http_handler).clone();

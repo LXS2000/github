@@ -41,15 +41,10 @@ rustls-native-certs = "0.6.2"
 rustls-pemfile = "1.0.0"
 
 moka = { version = "0.12.0", features = ["future"] }
-sqlx = { version = "0.7", features = [
-    "sqlite",
-    "runtime-tokio-rustls",
-    "chrono",
-] }
+
 
 udp-stream = "0.0.11"
-content-security-policy = { version = "0.5.1", path = "./content-security-policy" }
-html5ever = "0.23.0"
+
 kuchiki = "0.7.3"
 markup5ever = "0.8.1"
 
@@ -74,20 +69,6 @@ base64 = "0.21.5"
 sled = "0.34.7"
 
 
-rquickjs = { version = "0.5.1", features = [
-    "chrono",
-    # "bindgen",
-    "dyn-load",
-    "loader",
-    "futures",
-    "either",
-    "indexmap",
-    "classes",
-    "properties",
-    "array-buffer",
-    "macro",
-    "parallel",
-] }
 
 regex = "1.10.2"
 futures = "0.3.29"
@@ -115,4 +96,4 @@ winreg = "0.51.0"
 # [target.x86_64-unknown-linux-musl]
 # linker = "rust-lld"
 [workspace]
-members = ["content-security-policy"]
+

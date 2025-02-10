@@ -1,5 +1,5 @@
 ﻿use std::sync::Arc;
-use rand::{rngs::StdRng, seq::SliceRandom};
+use rand::{rngs::StdRng, seq::SliceRandom, Rng};
 
 use rustls::{OwnedTrustAnchor, ALL_KX_GROUPS, DEFAULT_CIPHER_SUITES};
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
@@ -151,7 +151,10 @@ pub fn random_ja3(seed: usize) -> ClientConfig {
 
         let mut cipher_suites = DEFAULT_CIPHER_SUITES.to_vec();
         cipher_suites.shuffle(&mut random);
-
+        // ja4
+        let index= random.gen_range(0..cipher_suites.len());
+        cipher_suites.remove(index);
+        //
         let mut kx_groups = ALL_KX_GROUPS.to_vec();
         kx_groups.shuffle(&mut random);
 

@@ -9,6 +9,7 @@ use std::{
 
 use hyper::http::Uri;
 use rquickjs::{AsyncContext, AsyncRuntime};
+use serde::Deserialize;
 use sled::Db;
 use tokio::sync::{Mutex, RwLock};
 
@@ -18,12 +19,7 @@ use crate::{
     utils, Sink,
 };
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Default)]
-pub struct ProxyCfg {
-    pub ja3: i64,
-    pub h2: i64,
-    pub proxy: Option<Uri>,
-}
+
 
 #[derive(Debug, Default)]
 pub struct ClientManager {
