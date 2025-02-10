@@ -1,1 +1,1 @@
-./cthulhurs.exe run
+.\\cthulhurs.exe run
