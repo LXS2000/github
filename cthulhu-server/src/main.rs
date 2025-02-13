@@ -23,6 +23,7 @@ use rustls_pemfile as pemfile;
 use time::macros::format_description;
 use tracing::Level;
 use tracing_subscriber::{fmt::time::LocalTime, FmtSubscriber};
+use utils::mini_match;
 
 use crate::net_proxy::AddrListenerServer;
 
@@ -141,9 +142,8 @@ impl HttpHandler for Handler {
 
         let headers = req.headers_mut();
 
-        headers.append("mitm-uri", HeaderValue::from_str(&uri.to_string()).unwrap());
-        headers.append("mitm-version", HeaderValue::from_str(&format!("{:?}", version)).unwrap());
         let host_ = uri.host().unwrap();
+        let mut is_matched = false;
         for Match {
             host,
             ja3,
@@ -152,21 +152,37 @@ impl HttpHandler for Handler {
         } in &CONFIG.matches
         {
             if utils::mini_match(&host, host_) {
+                headers.append("mitm-uri", HeaderValue::from_str(&uri.to_string()).unwrap());
+                headers.append(
+                    "mitm-version",
+                    HeaderValue::from_str(&format!("{:?}", version)).unwrap(),
+                );
                 headers.append(
                     "mitm-proxy",
                     HeaderValue::from_str(&proxy.clone().unwrap_or_default()).unwrap(),
                 );
                 headers.append("mitm-akamai", HeaderValue::from_str(akamai).unwrap());
                 headers.append("mitm-ja3", HeaderValue::from_str(ja3).unwrap());
+                is_matched = true;
                 break;
             }
         }
+        if !is_matched {
+            return Answer::Release(req);
+        }
+        let is_test = req.uri().to_string() == "https://browserleaks.com/css/style.css?v=86540715";
         *req.uri_mut() = Uri::from_static("https://127.0.0.1:520/");
         let req = reqwest_request_from_hyper(req);
         let call = HTTP_CLIENT.clone().execute(req).await;
         match call {
             Ok(res) => {
                 let res = reqwest_response_to_hyper(res).unwrap();
+                if is_test {
+                    let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
+                    let body = String::from_utf8(body.to_vec()).unwrap();
+                    println!("body:\n{}", body);
+                    return Answer::Respond(Response::new(Body::empty()));
+                }
                 Answer::Respond(res)
             }
             Err(e) => {
@@ -244,4 +260,9 @@ async fn main() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     run_server().await
+}
+#[test]
+fn test() {
+    let a = mini_match("a.b.c", "a.b.c");
+    println!("{}", a)
 }
