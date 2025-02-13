@@ -1,1 +1,1 @@
-.\\cthulhurs.exe run
+cthulhu.exe run
