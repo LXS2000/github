@@ -51,7 +51,7 @@ fn bad_request() -> Response<Body> {
 }
 
 fn spawn_with_trace<T: Send + Sync + 'static>(
-    fut: impl Future<Output = T> + Send + 'static,
+    fut: impl Future<Output=T> + Send + 'static,
     span: Span,
 ) -> JoinHandle<T> {
     tokio::spawn(fut.instrument(span))
@@ -208,61 +208,19 @@ where
                 if let Err(e) = self.serve_stream(upgraded, Scheme::HTTP, authority).await {
                     error!("WebSocket connect error: {e},URI:{uri}");
                 }
-
                 return;
             }
-            let server_stream = {
-                if authority.host().ends_with("cthulhu.server") {
-                    None
-                } else {
-                    let random_ja3 = ja3::random_ja3(0);
-                    let stream = match connect_to_dns(&authority, Arc::new(random_ja3)).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("Failed to connect to dns {}: {}", authority.host(), e);
-                            return;
-                        }
-                    };
-                    Some(stream)
-                }
-            };
+
             if buffer[..2] == *b"\x16\x03" {
                 let server_config = {
-                    match &server_stream {
-                        Some(stream) => {
-                            let alpn = {
-                                let (_server, client) = stream.get_ref();
-                                let alpn = match client.alpn_protocol() {
-                                    Some(v) => v.to_vec(),
-                                    None => {
-                                        warn!(
-                                            "No protocols were offered or accepted by the peer {}",
-                                            authority
-                                        );
-                                        b"http/1.1".to_vec()
-                                    }
-                                };
-                                alpn
-                            };
+                    let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-                            let server_config = self
-                                .ca
-                                .gen_server_config(&authority, vec![alpn])
-                                .instrument(info_span!("gen_server_config"))
-                                .await;
-                            server_config
-                        }
-                        None => {
-                            let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-                            let server_config = self
-                                .ca
-                                .gen_server_config(&authority, alpn)
-                                .instrument(info_span!("gen_server_config"))
-                                .await;
-                            server_config
-                        }
-                    }
+                    let server_config = self
+                        .ca
+                        .gen_server_config(&authority, alpn)
+                        .instrument(info_span!("gen_server_config"))
+                        .await;
+                    server_config
                 };
 
                 let stream = match TlsAcceptor::from(server_config).accept(upgraded).await {
@@ -285,13 +243,6 @@ where
                 "Unknown protocol, read '{:02X?}' from upgraded connection",
                 &buffer[..bytes_read]
             );
-
-            if let Some(mut stream) = server_stream {
-                // let (server,_) = stream.get_mut();
-                if let Err(e) = tokio::io::copy_bidirectional(&mut upgraded, &mut stream).await {
-                    error!("Failed to tunnel to {}: {}", authority, e);
-                }
-            }
         };
 
         spawn_with_trace(fut, span);
@@ -369,7 +320,7 @@ where
             false,
             self.websocket_connector,
         )
-        .await?;
+            .await?;
 
         let (server_sink, server_stream) = server_socket.split();
         let (client_sink, client_stream) = client_socket.split();
@@ -454,9 +405,9 @@ where
 }
 
 fn spawn_message_forwarder(
-    stream: impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin + Send + 'static,
-    src_sink: Arc<Mutex<impl Sink<Message, Error = tungstenite::Error> + Unpin + Send + 'static>>,
-    dst_sink: Arc<Mutex<impl Sink<Message, Error = tungstenite::Error> + Unpin + Send + 'static>>,
+    stream: impl Stream<Item=Result<Message, tungstenite::Error>> + Unpin + Send + 'static,
+    src_sink: Arc<Mutex<impl Sink<Message, Error=tungstenite::Error> + Unpin + Send + 'static>>,
+    dst_sink: Arc<Mutex<impl Sink<Message, Error=tungstenite::Error> + Unpin + Send + 'static>>,
     handler: impl WebSocketHandler,
     ctx: WebSocketContext,
 ) {
