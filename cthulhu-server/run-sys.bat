@@ -1,0 +1,1 @@
+.\\cthulhurs.exe run -s
