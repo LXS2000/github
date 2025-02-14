@@ -1,26 +1,31 @@
 use crate::{
     auto_result, ja3,
     net_proxy::{
-        certificate_authority::CertificateAuthority, rewind::Rewind, Answer, HttpContext,
-        HttpHandler, WebSocketContext, WebSocketHandler,
+        certificate_authority::CertificateAuthority, rewind::Rewind, HttpContext, HttpHandler,
+        WebSocketContext, WebSocketHandler,
     },
-    reqwest_request_from_hyper, reqwest_response_to_hyper, HTTP_CLIENT,
+    HTTP_CLIENT,
 };
 
 use futures::{Sink, Stream, StreamExt};
 
+use crate::net_proxy::body::Body;
+use crate::net_proxy::RequestOrResponse;
 use hyper::{
-    http::{
-        header::SEC_WEBSOCKET_EXTENSIONS,
-        uri::{Authority, Scheme},
-    },
-    service::Service,
+    body::{Bytes, Incoming},
+    header::Entry,
+    service::service_fn,
+    upgrade::Upgraded,
     Method, Request, Response, StatusCode, Uri,
 };
+use hyper_util::{
+    client::legacy::{connect::Connect, Client},
+    rt::{TokioExecutor, TokioIo},
+    server,
+};
 
-use hyper::{header::Entry, server::conn::Http, service::service_fn, upgrade::Upgraded, Body};
-use reqwest::Client;
-use rustls::{server::DnsName, ClientConfig};
+use hyper::header::SEC_WEBSOCKET_EXTENSIONS;
+use hyper::http::uri::{Authority, Scheme};
 use std::{
     convert::Infallible,
     future::Future,
@@ -29,6 +34,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::TcpStream,
@@ -51,68 +57,77 @@ fn bad_request() -> Response<Body> {
 }
 
 fn spawn_with_trace<T: Send + Sync + 'static>(
-    fut: impl Future<Output=T> + Send + 'static,
+    fut: impl Future<Output = T> + Send + 'static,
     span: Span,
 ) -> JoinHandle<T> {
     tokio::spawn(fut.instrument(span))
 }
-async fn connect_to_dns(
-    authority: &Authority,
-    ca: Arc<ClientConfig>,
-) -> io::Result<TlsStream<TcpStream>> {
-    let stream = TcpStream::connect(authority.as_ref()).await?;
-    let connector = TlsConnector::from(ca);
-    let host = authority.host();
-    let server_name = match DnsName::try_from_ascii(host.as_bytes()) {
-        Ok(v) => rustls::ServerName::DnsName(v),
-        Err(_e) => {
-            let ip = match IpAddr::from_str(host) {
-                Ok(v) => v,
-                Err(_e) => {
-                    panic!("invalid server name:{authority}")
-                }
-            };
-            let ip_address = rustls::ServerName::IpAddress(ip);
-            ip_address
-        }
-    };
-    let stream = connector.connect(server_name, stream).await?;
-    Ok(stream)
-}
-pub(crate) struct NetProxy<CA, H, W> {
+
+// async fn connect_to_dns(
+//     authority: &Authority,
+//     ca: Arc<ClientConfig>,
+// ) -> io::Result<TlsStream<TcpStream>> {
+//     let stream = TcpStream::connect(authority.as_ref()).await?;
+//     let connector = TlsConnector::from(ca);
+//     let host = authority.host();
+//     let server_name = match DnsName::try_from_ascii(host.as_bytes()) {
+//         Ok(v) => rustls::ServerName::DnsName(v),
+//         Err(_e) => {
+//             let ip = match IpAddr::from_str(host) {
+//                 Ok(v) => v,
+//                 Err(_e) => {
+//                     panic!("invalid server name:{authority}")
+//                 }
+//             };
+//             let ip_address = rustls::ServerName::IpAddress(ip);
+//             ip_address
+//         }
+//     };
+//     let stream = connector.connect(server_name, stream).await?;
+//     Ok(stream)
+// }
+pub(crate) struct InternalProxy<C, CA, H, W> {
     pub ca: Arc<CA>,
+    pub client: Client<C, Body>,
+    pub server: server::conn::auto::Builder<TokioExecutor>,
     pub http_handler: H,
     pub websocket_handler: W,
     pub websocket_connector: Option<Connector>,
     pub client_addr: SocketAddr,
+    pub uri: Uri,
 }
 
-impl<CA, H, W> Clone for NetProxy<CA, H, W>
+impl<C, CA, H, W> Clone for InternalProxy<C, CA, H, W>
 where
+    C: Clone,
     H: Clone,
     W: Clone,
 {
     fn clone(&self) -> Self {
-        NetProxy {
+        InternalProxy {
             ca: Arc::clone(&self.ca),
+            client: self.client.clone(),
+            server: self.server.clone(),
             http_handler: self.http_handler.clone(),
             websocket_handler: self.websocket_handler.clone(),
             websocket_connector: self.websocket_connector.clone(),
             client_addr: self.client_addr,
+            uri: self.uri.clone(),
         }
     }
 }
 
-impl<CA, H, W> NetProxy<CA, H, W>
+impl<C, CA, H, W> InternalProxy<C, CA, H, W>
 where
+    C: Connect + Clone + Send + Sync + 'static,
     CA: CertificateAuthority,
     H: HttpHandler,
     W: WebSocketHandler,
 {
-    fn context(&self, req: &Request<Body>) -> HttpContext {
+    fn context(&self) -> HttpContext {
         HttpContext {
             client_addr: self.client_addr,
-            uri: req.uri().clone(),
+            uri: self.uri.clone(),
         }
     }
 
@@ -125,18 +140,20 @@ where
             client_addr = %self.client_addr,
         )
     )]
-    pub(crate) async fn proxy(mut self, req: Request<Body>) -> Result<Response<Body>, Infallible> {
-        let ctx = self.context(&req);
+    pub(crate) async fn proxy(
+        mut self,
+        req: Request<Incoming>,
+    ) -> Result<Response<Body>, Infallible> {
+        let ctx = self.context();
 
         let req = match self
             .http_handler
-            .handle_request(&ctx, req)
+            .handle_request(&ctx, req.map(Body::from))
             .instrument(info_span!("handle_request"))
             .await
         {
-            Answer::Reject => return Ok(bad_request()),
-            Answer::Release(req) => req,
-            Answer::Respond(res) => return Ok(res),
+            RequestOrResponse::Request(req) => req,
+            RequestOrResponse::Response(res) => return Ok(res),
         };
 
         if req.method() == Method::CONNECT {
@@ -144,30 +161,23 @@ where
         } else if hyper_tungstenite::is_upgrade_request(&req) {
             Ok(self.upgrade_websocket(req))
         } else {
-            // let version = req.version();
-            // *req.version_mut()=Version::HTTP_11;
-            // let method = req.method().to_string();
-            let req = reqwest_request_from_hyper(req);
-            let res = HTTP_CLIENT
-                .clone()
-                .call(req)
+            let res = self
+                .client
+                .request(normalize_request(req))
                 .instrument(info_span!("proxy_request"))
                 .await;
 
             match res {
                 Ok(res) => Ok(self
                     .http_handler
-                    .handle_response(&ctx, reqwest_response_to_hyper(res).unwrap())
+                    .handle_response(&ctx, res.map(Body::from))
                     .instrument(info_span!("handle_response"))
                     .await),
-                Err(err) => {
-                    let error = err.to_string();
-                    Ok(self
-                        .http_handler
-                        .handle_error(&ctx, error)
-                        .instrument(info_span!("handle_error"))
-                        .await)
-                }
+                Err(err) => Ok(self
+                    .http_handler
+                    .handle_error(&ctx, err)
+                    .instrument(info_span!("handle_error"))
+                    .await),
             }
         }
     }
@@ -181,12 +191,15 @@ where
         };
 
         let span = info_span!("process_connect");
+    
         let fut = async move {
-            let mut upgraded = auto_result!( hyper::upgrade::on(&mut req).await ,err=>{
+         
+            let upgraded = auto_result!(hyper::upgrade::on(&mut req).await ,err=>{
                error!("Upgrade error: {err}");
                return;
             });
-            let ctx = self.context(&req);
+            let mut upgraded = TokioIo::new(upgraded);
+            let ctx = self.context();
             let uri = &ctx.uri;
             let mut buffer = [0; 4];
             let bytes_read = auto_result!(upgraded.read(&mut buffer).await,e=>{
@@ -196,16 +209,18 @@ where
                return;
             });
 
-            let mut upgraded = Rewind::new_buffered(
+            let upgraded = Rewind::new(
                 upgraded,
-                bytes::Bytes::copy_from_slice(buffer[..bytes_read].as_ref()),
+                Bytes::copy_from_slice(buffer[..bytes_read].as_ref()),
             );
-
             if !self.http_handler.should_intercept(&ctx, &req).await {
                 return;
             }
             if buffer == *b"GET " {
-                if let Err(e) = self.serve_stream(upgraded, Scheme::HTTP, authority).await {
+                if let Err(e) = self
+                    .serve_stream(TokioIo::new(upgraded), Scheme::HTTP, authority)
+                    .await
+                {
                     error!("WebSocket connect error: {e},URI:{uri}");
                 }
                 return;
@@ -214,9 +229,8 @@ where
             if buffer[..2] == *b"\x16\x03" {
                 let server_config = {
                     let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-                    let server_config = self
-                        .ca
+                    let ca = self.ca.clone();
+                    let server_config = ca
                         .gen_server_config(&authority, alpn)
                         .instrument(info_span!("gen_server_config"))
                         .await;
@@ -224,7 +238,7 @@ where
                 };
 
                 let stream = match TlsAcceptor::from(server_config).accept(upgraded).await {
-                    Ok(stream) => stream,
+                    Ok(stream) => TokioIo::new(stream),
                     Err(e) => {
                         error!("Failed to establish TLS connection: {e},URI:{uri}");
                         return;
@@ -244,15 +258,15 @@ where
                 &buffer[..bytes_read]
             );
         };
-
         spawn_with_trace(fut, span);
         Response::new(Body::empty())
     }
 
-    // #[instrument(skip_all)]
+    #[instrument(skip_all)]
     fn upgrade_websocket(self, req: Request<Body>) -> Response<Body> {
         let mut req = {
             let (mut parts, _) = req.into_parts();
+
             parts.uri = {
                 let mut parts = parts.uri.into_parts();
 
@@ -277,38 +291,34 @@ where
 
             Request::from_parts(parts, ())
         };
-        let upgrade = hyper_tungstenite::upgrade(&mut req, Some(Default::default()));
 
-        let (res, websocket) = match upgrade {
-            Ok(v) => v,
-            Err(_) => return bad_request(),
-        };
-
-        spawn_with_trace(
-            async move {
-                match websocket.await {
-                    Ok(ws) => {
-                        if let Err(e) = self.handle_websocket(ws, req).await {
-                            error!("Failed to handle WebSocket: {}", e);
-                            return;
+        match hyper_tungstenite::upgrade(&mut req, None) {
+            Ok((res, websocket)) => {
+                let span = info_span!("websocket");
+                let fut = async move {
+                    match websocket.await {
+                        Ok(ws) => {
+                            if let Err(e) = self.handle_websocket(ws, req).await {
+                                error!("Failed to handle WebSocket: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to upgrade to WebSocket: {}", e);
                         }
                     }
+                };
 
-                    Err(e) => {
-                        error!("Failed to upgrade to WebSocket: {}", e);
-                        return;
-                    }
-                }
-            },
-            info_span!("webSocket"),
-        );
-        res
+                spawn_with_trace(fut, span);
+                res.map(Body::from)
+            }
+            Err(_) => bad_request(),
+        }
     }
 
     #[instrument(skip_all)]
     async fn handle_websocket(
         self,
-        client_socket: WebSocketStream<Upgraded>,
+        client_socket: WebSocketStream<TokioIo<Upgraded>>,
         req: Request<()>,
     ) -> Result<(), tungstenite::Error> {
         let uri = req.uri().clone();
@@ -320,35 +330,31 @@ where
             false,
             self.websocket_connector,
         )
-            .await?;
+        .await?;
 
         let (server_sink, server_stream) = server_socket.split();
         let (client_sink, client_stream) = client_socket.split();
-        let server_sink = Arc::new(Mutex::new(server_sink));
-        let client_sink = Arc::new(Mutex::new(client_sink));
-        let NetProxy {
+        let InternalProxy {
             websocket_handler, ..
         } = self;
 
         spawn_message_forwarder(
-            client_stream,
-            client_sink.clone(),
-            server_sink.clone(),
+            server_stream,
+            client_sink,
             websocket_handler.clone(),
-            WebSocketContext::ClientToServer {
-                src: self.client_addr,
-                dst: uri.clone(),
+            WebSocketContext::ServerToClient {
+                src: uri.clone(),
+                dst: self.client_addr,
             },
         );
 
         spawn_message_forwarder(
-            server_stream,
+            client_stream,
             server_sink,
-            client_sink,
             websocket_handler,
-            WebSocketContext::ServerToClient {
-                src: uri,
-                dst: self.client_addr,
+            WebSocketContext::ClientToServer {
+                src: self.client_addr,
+                dst: uri,
             },
         );
 
@@ -361,9 +367,9 @@ where
         stream: I,
         scheme: Scheme,
         authority: Authority,
-    ) -> Result<(), hyper::Error>
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     where
-        I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
     {
         let service = service_fn(|mut req| {
             if req.version() == hyper::Version::HTTP_10 || req.version() == hyper::Version::HTTP_11
@@ -397,22 +403,20 @@ where
             }
         });
 
-        Http::new()
-            .serve_connection(stream, service)
-            .with_upgrades()
+        self.server
+            .serve_connection_with_upgrades(stream, service)
             .await
     }
 }
 
 fn spawn_message_forwarder(
-    stream: impl Stream<Item=Result<Message, tungstenite::Error>> + Unpin + Send + 'static,
-    src_sink: Arc<Mutex<impl Sink<Message, Error=tungstenite::Error> + Unpin + Send + 'static>>,
-    dst_sink: Arc<Mutex<impl Sink<Message, Error=tungstenite::Error> + Unpin + Send + 'static>>,
+    stream: impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin + Send + 'static,
+    sink: impl Sink<Message, Error = tungstenite::Error> + Unpin + Send + 'static,
     handler: impl WebSocketHandler,
     ctx: WebSocketContext,
 ) {
     let span = info_span!("message_forwarder", context = ?ctx);
-    let fut = handler.handle_websocket(ctx, stream, src_sink, dst_sink);
+    let fut = handler.handle_websocket(ctx, stream, sink);
     spawn_with_trace(fut, span);
 }
 

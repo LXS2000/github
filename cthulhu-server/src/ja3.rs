@@ -109,45 +109,48 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore, DEFAULT_VERSIONS};
 
 // }
 
-pub fn root_store() -> RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
+// pub fn root_store() -> RootCertStore {
+//     let mut roots = rustls::RootCertStore::empty();
 
-    for cert in rustls_native_certs::load_native_certs().expect("加载本地系统证书失败") {
-        let cert = rustls::Certificate(cert.0);
-        roots.add(&cert).unwrap();
-    }
+//     for cert in rustls_native_certs::load_native_certs().expect("加载本地系统证书失败") {
+//         let cert = rustls::Certificate(cert.0);
+//         roots.add(&cert).unwrap();
+//     }
 
-    roots
-}
+//     roots
+// }
 
 //TLSVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats
-pub fn random_ja3(seed: usize) -> ClientConfig {
-    let root_store = root_store();
-    let  mut tls_config = if seed == 0 {
-        ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-    } else {
-        let mut random: StdRng = rand::SeedableRng::seed_from_u64(seed as u64);
+// pub fn random_ja3(seed: usize) -> ClientConfig {
+//     let root_store = root_store();
+//     let mut tls_config = if seed == 0 {
+//         ClientConfig::builder()
+//             // .with_safe_defaults()
+//             .with_root_certificates(root_store)
+//             .with_no_client_auth()
+//     } else {
+//         let mut random: StdRng = rand::SeedableRng::seed_from_u64(seed as u64);
 
-        let mut cipher_suites = DEFAULT_CIPHER_SUITES.to_vec();
-        cipher_suites.shuffle(&mut random);
+//         let mut cipher_suites = DEFAULT_CIPHER_SUITES.to_vec();
+//         cipher_suites.shuffle(&mut random);
 
-        let mut kx_groups = ALL_KX_GROUPS.to_vec();
-        kx_groups.shuffle(&mut random);
+//         let mut kx_groups = ALL_KX_GROUPS.to_vec();
+//         kx_groups.shuffle(&mut random);
 
-        let mut protocol_versions = DEFAULT_VERSIONS.to_vec();
-        protocol_versions.shuffle(&mut random);
+//         let mut protocol_versions = DEFAULT_VERSIONS.to_vec();
+//         protocol_versions.shuffle(&mut random);
 
-        ClientConfig::builder()
-            .with_cipher_suites(&cipher_suites)
-            .with_kx_groups(&kx_groups)
-            .with_protocol_versions(&protocol_versions)
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-    };
-    tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    tls_config
-}
+//         ClientConfig::builder()
+//             .dangerous()
+//             .with_custom_certificate_verifier(verifier)
+//             .
+//             .with_cipher_suites(&cipher_suites)
+//             .with_kx_groups(&kx_groups)
+//             .with_protocol_versions(&protocol_versions)
+//             .unwrap()
+//             .with_root_certificates(root_store)
+//             .with_no_client_auth()
+//     };
+//     tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+//     tls_config
+// }

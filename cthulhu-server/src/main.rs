@@ -1,43 +1,56 @@
-﻿use std::{fs, net::SocketAddr, str::FromStr, sync::Arc};
+﻿use std::{fs, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 
+use http_body_util::BodyExt;
 use hyper::{
-    client::HttpConnector, header::HeaderValue, service::Service, Body, Method, Request, Response,
-    Uri, Version,
+    header::{HeaderValue, ACCEPT_ENCODING, CONTENT_ENCODING, HOST},
+    Method, Request, Response, Uri,
 };
 
 use hyper_rustls::HttpsConnector;
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::TokioExecutor,
+};
 use lazy_static::lazy_static;
 use local_ip_address::local_ip;
 
 use net_proxy::{
-    certificate_authority::RcgenAuthority, Answer, CustomProxy, HttpContext, HttpHandler,
-    WebSocketHandler,
+    body::Body, certificate_authority::RcgenAuthority, decoder::decode_request, HttpContext,
+    HttpHandler, Proxy, RequestOrResponse, WebSocketHandler,
 };
 
+use rcgen::{CertificateParams, KeyPair};
+use rsa::signature::Keypair;
+use rustls_pki_types::UnixTime;
 use serde::Deserialize;
 
 use rustls_pemfile as pemfile;
 
+use crate::net_proxy::decoder::decode_response;
 use time::macros::format_description;
+use tokio_rustls::rustls::{
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{aws_lc_rs, CryptoProvider},
+    pki_types::ServerName,
+    ClientConfig, DigitallySignedStruct, SignatureScheme,
+};
 use tracing::Level;
 use tracing_subscriber::{fmt::time::LocalTime, FmtSubscriber};
 use utils::mini_match;
 
-use crate::net_proxy::AddrListenerServer;
-
 mod ja3;
 mod net_proxy;
 mod proxy;
-mod rcgen;
+mod rcgen_ca;
 mod utils;
 
 mod macros;
 
-// type NetClient = hyper::Client<HttpsConnector<HttpConnector>, Body>;
-type NetClient = reqwest::Client;
-type AppProxy<'ca> = CustomProxy<RcgenAuthority, Handler, Handler>;
+type NetClient = Client<HttpsConnector<HttpConnector>, Body>;
+// type NetClient = reqwest::Client;
+// type AppProxy<'ca> = Proxy<RcgenAuthority, Handler, Handler>;
 
 // const TIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
 lazy_static! {
@@ -46,27 +59,23 @@ lazy_static! {
 
     ///sever http客户端
     pub static ref HTTP_CLIENT: NetClient = {
-       let c= reqwest::ClientBuilder::new()
-      .tls_built_in_root_certs(true)
 
-    //   .cookie_store(false)
-    //   .referer(false)
-      .no_brotli().no_deflate().no_gzip()
-      .danger_accept_invalid_certs(true)
-
-        .use_rustls_tls().build().unwrap();
-    //    let conn=HttpConnector::new();
-    //    let conn= hyper_rustls::HttpsConnectorBuilder::new()
-    //     .with_native_roots()
-    //     .https_or_http().enable_all_versions()
-    //     .wrap_connector(conn);
-    //    hyper::Client::builder().build(conn)
-    c
+        let mut conn = HttpConnector::new();
+        conn.enforce_http(false);
+        let conn = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(ClientConfig::builder().dangerous().with_custom_certificate_verifier(Arc::new(NoVerifier)).with_no_client_auth())
+            .https_or_http()
+            .enable_all_versions()
+            .wrap_connector(conn);
+        let client = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(30))
+            .http2_only(true)
+            .build(conn);
+        client
     };
     pub static ref IS_SYS_PROXY:std::sync::RwLock<bool>=std::sync::RwLock::new(false);
 
-    //CA证书
-    pub static ref AUTH:Arc <RcgenAuthority>=Arc::new(read_ca());
+
     pub static ref CONFIG:Config={
         let bytes = fs::read("./config.json").expect("配置文件读取失败");
         let cfg = serde_json::from_slice::<Config>(&bytes).expect("配置文件格式不正确");
@@ -74,36 +83,90 @@ lazy_static! {
     };
 
 }
-pub fn reqwest_response_to_hyper(
-    res: reqwest::Response,
-) -> Result<hyper::Response<Body>, Box<dyn std::error::Error>> {
-    let status = res.status();
-    let version = res.version();
-    let headers = res.headers();
-    // println!("{:?}",headers);
-    let headers = headers.clone();
 
-    let mut response = hyper::Response::builder()
-        .version(version)
-        .status(status)
-        .body(Body::wrap_stream(res.bytes_stream()))?;
-    *response.headers_mut() = headers;
-    Ok(response)
+#[derive(Debug)]
+pub(crate) struct NoVerifier;
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls_pki_types::CertificateDer<'_>,
+        intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls_pki_types::CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls_pki_types::CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
 }
 
-pub fn reqwest_request_from_hyper(req: hyper::Request<Body>) -> reqwest::Request {
-    let (parts, body) = req.into_parts();
-    let mut request = reqwest::Request::new(
-        parts.method,
-        reqwest::Url::from_str(&parts.uri.to_string()).unwrap(),
-    );
+// pub fn reqwest_response_to_hyper(
+//     res: reqwest::Response,
+// ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn std::error::Error>> {
 
-    *request.headers_mut() = parts.headers;
-    *request.version_mut() = parts.version;
+//     let status = res.status();
+//     let version = res.version();
+//     let headers = res.headers();
+//     // println!("{:?}",headers);
+//     let headers = headers.clone();
 
-    *request.body_mut() = Some(reqwest::Body::from(body));
-    request
-}
+//     let mut response = hyper::Response::builder()
+//         .version(version)
+//         .status(status)
+//         .body(hyper::body::Incoming::from(res.bytes_stream()))?;
+//     *response.headers_mut() = headers;
+//     Ok(response)
+// }
+
+// pub fn reqwest_request_from_hyper(req: hyper::Request<body::Incoming>) -> reqwest::Request {
+//     let (parts, body) = req.into_parts();
+//     let mut request = reqwest::Request::new(
+//         parts.method,
+//         reqwest::Url::from_str(&parts.uri.to_string()).unwrap(),
+//     );
+
+//     *request.headers_mut() = parts.headers;
+//     *request.version_mut() = parts.version;
+
+//     *request.body_mut() = Some(reqwest::Body::wrap_stream(req.into_body()));
+//     request
+// }
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
@@ -126,15 +189,16 @@ pub struct Config {
 }
 #[derive(Debug, Clone)]
 struct Handler;
-#[async_trait]
+
 impl HttpHandler for Handler {
     async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
         mut req: Request<Body>,
-    ) -> Answer<Request<Body>, Response<Body>> {
+    ) -> RequestOrResponse {
+        req.headers_mut().remove(ACCEPT_ENCODING);
         if req.method() == Method::CONNECT {
-            return Answer::Release(req);
+            return req.into();
         }
         let uri = req.uri().clone();
         let version = req.version();
@@ -168,22 +232,27 @@ impl HttpHandler for Handler {
             }
         }
         if !is_matched {
-            return Answer::Release(req);
+            return req.into();
         }
         let is_test = req.uri().to_string() == "https://browserleaks.com/css/style.css?v=86540715";
         *req.uri_mut() = Uri::from_static("https://127.0.0.1:520/");
-        let req = reqwest_request_from_hyper(req);
-        let call = HTTP_CLIENT.clone().execute(req).await;
+        // req.headers_mut().remove(HOST);
+        // let req = decode_request(req).unwrap();
+        let call = HTTP_CLIENT.clone().request(req).await;
         match call {
             Ok(res) => {
-                let res = reqwest_response_to_hyper(res).unwrap();
-                if is_test {
-                    let body = hyper::body::to_bytes(res.into_body()).await.unwrap();
-                    let body = String::from_utf8(body.to_vec()).unwrap();
-                    println!("body:\n{}", body);
-                    return Answer::Respond(Response::new(Body::empty()));
-                }
-                Answer::Respond(res)
+                // if is_test {
+                //     println!("{:?}", res.version());
+                //     let body = res.collect().await.unwrap();
+                //     let body: String = String::from_utf8(body.to_bytes().to_vec()).unwrap();
+                //     // let body = String::from_utf8(body.to_vec()).unwrap();
+                //     println!("body:\n{}", body);
+                //     return Response::new(Body::empty()).into();
+                // }
+                let mut res = res.map(Body::from);
+                res.headers_mut().remove(CONTENT_ENCODING);
+                // let res=decode_response(res).unwrap();
+                res.into()
             }
             Err(e) => {
                 tracing::error!("{:?} uri:{}", &e, &uri);
@@ -191,7 +260,7 @@ impl HttpHandler for Handler {
                     .status(500)
                     .body(Body::from(e.to_string()))
                     .unwrap();
-                Answer::Respond(res)
+                res.into()
             }
         }
     }
@@ -204,43 +273,38 @@ fn read_ca() -> RcgenAuthority {
     let key = utils::read_bytes("./ca/ca.key").expect("读取密钥文件失败!");
     let cert = utils::read_bytes("./ca/ca.cer").expect("读取证书文件失败!");
 
-    let mut private_key_bytes: &[u8] = &key;
-    let mut ca_cert_bytes: &[u8] = &cert;
+    let key_pair =
+        KeyPair::from_pem(&String::from_utf8(key).unwrap()).expect("Failed to parse private key");
+    let ca_cert = CertificateParams::from_ca_cert_pem(&String::from_utf8(cert).unwrap())
+        .expect("Failed to parse CA certificate")
+        .self_signed(&key_pair)
+        .expect("Failed to sign CA certificate");
 
-    let private_key = rustls::PrivateKey(
-        pemfile::pkcs8_private_keys(&mut private_key_bytes)
-            .expect("Failed to parse private key")
-            .remove(0),
-    );
+    let ca = RcgenAuthority::new(key_pair, ca_cert, 1_000, aws_lc_rs::default_provider());
 
-    let ca_cert = rustls::Certificate(
-        pemfile::certs(&mut ca_cert_bytes)
-            .expect("Failed to parse CA certificate")
-            .remove(0),
-    );
-
-    let auth = RcgenAuthority::new(private_key.into(), ca_cert, 1_000)
-        .expect("Failed to create Certificate Authority");
-    auth
+    ca
 }
 async fn run_server() {
     //初始化ca证书
     let port = CONFIG.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let ca = read_ca();
+    // let rustls = tokio_tungstenite::Connector::Rustls(Arc::new(ja3::random_ja3(0)));
+    let proxy = Proxy::builder()
+        .with_addr(addr)
+        .with_ca(ca)
+        .with_rustls_client(aws_lc_rs::default_provider())
+        .with_http_handler(Handler)
+        .with_websocket_handler(Handler)
+        .with_graceful_shutdown(shutdown_signal())
+        .build()
+        .expect("Failed to create proxy");
 
-    let rustls = tokio_tungstenite::Connector::Rustls(Arc::new(ja3::random_ja3(0)));
-    let proxy = AppProxy::new(
-        AUTH.clone(),
-        AddrListenerServer::Addr(addr),
-        Handler,
-        Handler,
-        Some(rustls),
-    );
     let local_ip = auto_result!(local_ip(),err=>{
         panic!("获取本机内网地址失败：{}",err);
     });
     println!("server at port {local_ip}:{port}");
-    if let Err(e) = proxy.start(shutdown_signal()).await {
+    if let Err(e) = proxy.start().await {
         panic!("{}", e);
     }
 }
@@ -261,8 +325,26 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     run_server().await
 }
-#[test]
-fn test() {
-    let a = mini_match("a.b.c", "a.b.c");
-    println!("{}", a)
+#[tokio::test]
+async fn test() {
+    // let a = mini_match("a.b.c", "a.b.c");
+    // println!("{}", a)
+    let res = HTTP_CLIENT
+        .request(
+            Request::builder()
+                .uri(Uri::from_static(
+                    "https://browserleaks.com/css/style.css?v=86540715",
+                ))
+                .method(Method::GET)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    println!("headers:{:#?}",res.headers());
+    println!("{}","");
+    let body = res.collect().await.unwrap();
+    let body: String = String::from_utf8(body.to_bytes().to_vec()).unwrap();
+    // let body = String::from_utf8(body.to_vec()).unwrap();
+    println!("body:\n{}", body);
 }

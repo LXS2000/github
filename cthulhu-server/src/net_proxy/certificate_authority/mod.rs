@@ -1,11 +1,9 @@
-
 mod rcgen_authority;
 
-use async_trait::async_trait;
-use hyper::http::uri::Authority;
-use std::sync::Arc;
-use tokio_rustls::rustls::ServerConfig;
 
+use hyper::http::uri::Authority;
+use std::{future::Future, sync::Arc};
+use tokio_rustls::rustls::ServerConfig;
 
 pub use rcgen_authority::*;
 
@@ -17,8 +15,13 @@ const NOT_BEFORE_OFFSET: i64 = 60;
 ///
 /// Clients should be configured to either trust the provided root certificate, or to ignore
 /// certificate errors.
-#[async_trait]
+
 pub trait CertificateAuthority: Send + Sync + 'static {
     /// Generate ServerConfig for use with rustls.
-    async fn gen_server_config(&self, authority: &Authority,alpn:Vec<Vec<u8>>) -> Arc<ServerConfig>;
+
+    fn gen_server_config(
+        &self,
+        authority: &Authority,
+        alpn: Vec<Vec<u8>>,
+    ) -> impl Future<Output = Arc<ServerConfig>> + Send;
 }

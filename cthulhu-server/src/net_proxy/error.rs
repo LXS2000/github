@@ -1,16 +1,18 @@
 
-use rcgen::RcgenError;
 use thiserror::Error;
+use crate::net_proxy::builder;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("invalid CA: {0}")]
-    Tls(#[from] RcgenError),
-    #[error("network error: {0}")]
+    #[error("network error")]
     Network(#[from] hyper::Error),
+    #[error("io error")]
+    Io(#[from] std::io::Error),
     #[error("unable to decode body")]
     Decode,
+    #[error("builder error")]
+    Builder(#[from] builder::Error),
     #[error("unknown error")]
     Unknown,
 }
