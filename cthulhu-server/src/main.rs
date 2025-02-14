@@ -1,10 +1,11 @@
-﻿use std::{fs, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+﻿use std::{fs, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 
+use clap::{arg, ArgAction};
 use http_body_util::BodyExt;
 use hyper::{
-    header::{HeaderValue, ACCEPT_ENCODING, CONTENT_ENCODING, HOST},
+    header::{HeaderValue, ACCEPT_ENCODING, CONTENT_ENCODING},
     Method, Request, Response, Uri,
 };
 
@@ -17,28 +18,24 @@ use lazy_static::lazy_static;
 use local_ip_address::local_ip;
 
 use net_proxy::{
-    body::Body, certificate_authority::RcgenAuthority, decoder::decode_request, HttpContext,
-    HttpHandler, Proxy, RequestOrResponse, WebSocketHandler,
+    body::Body, certificate_authority::RcgenAuthority, HttpContext, HttpHandler, Proxy,
+    RequestOrResponse, WebSocketHandler,
 };
 
 use rcgen::{CertificateParams, KeyPair};
-use rsa::signature::Keypair;
+
 use rustls_pki_types::UnixTime;
 use serde::Deserialize;
 
-use rustls_pemfile as pemfile;
-
-use crate::net_proxy::decoder::decode_response;
 use time::macros::format_description;
 use tokio_rustls::rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{aws_lc_rs, CryptoProvider},
+    crypto::aws_lc_rs,
     pki_types::ServerName,
     ClientConfig, DigitallySignedStruct, SignatureScheme,
 };
 use tracing::Level;
 use tracing_subscriber::{fmt::time::LocalTime, FmtSubscriber};
-use utils::mini_match;
 
 mod ja3;
 mod net_proxy;
@@ -136,43 +133,37 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
-// pub fn reqwest_response_to_hyper(
-//     res: reqwest::Response,
-// ) -> Result<hyper::Response<hyper::body::Incoming>, Box<dyn std::error::Error>> {
-
-//     let status = res.status();
-//     let version = res.version();
-//     let headers = res.headers();
-//     // println!("{:?}",headers);
-//     let headers = headers.clone();
-
-//     let mut response = hyper::Response::builder()
-//         .version(version)
-//         .status(status)
-//         .body(hyper::body::Incoming::from(res.bytes_stream()))?;
-//     *response.headers_mut() = headers;
-//     Ok(response)
-// }
-
-// pub fn reqwest_request_from_hyper(req: hyper::Request<body::Incoming>) -> reqwest::Request {
-//     let (parts, body) = req.into_parts();
-//     let mut request = reqwest::Request::new(
-//         parts.method,
-//         reqwest::Url::from_str(&parts.uri.to_string()).unwrap(),
-//     );
-
-//     *request.headers_mut() = parts.headers;
-//     *request.version_mut() = parts.version;
-
-//     *request.body_mut() = Some(reqwest::Body::wrap_stream(req.into_body()));
-//     request
-// }
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
 
     println!("exit...");
+}
+
+fn get_cmd() -> clap::Command {
+    clap::Command::new("cthulhu")
+        .about("a high performance packet capture proxy server")
+        .author("li xiu shun 3451743380@qq.com")
+        .arg_required_else_help(true)
+        .allow_external_subcommands(true)
+        .subcommand(
+            clap::Command::new("run").about("run the server").arg(
+                arg!(sys: -s "set server to be system proxy")
+                    .required(false)
+                    .action(ArgAction::SetTrue),
+            ),
+        )
+        .subcommand(
+            clap::Command::new("cagen")
+                .about("generate self signed cert with random privkey")
+                .arg(
+                    arg!(<DIR> "cert file output dir")
+                        .required(false)
+                        .default_missing_value("./ca/")
+                        .default_value("./ca/"),
+                ),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,7 +225,7 @@ impl HttpHandler for Handler {
         if !is_matched {
             return req.into();
         }
-        let is_test = req.uri().to_string() == "https://browserleaks.com/css/style.css?v=86540715";
+        // let is_test = req.uri().to_string() == "https://browserleaks.com/css/style.css?v=86540715";
         *req.uri_mut() = Uri::from_static("https://127.0.0.1:520/");
         // req.headers_mut().remove(HOST);
         // let req = decode_request(req).unwrap();
@@ -311,22 +302,55 @@ async fn run_server() {
 
 #[tokio::main]
 async fn main() {
-    //注册日志
-    let timer = LocalTime::new(format_description!(
-        "[year]-[month padding:zero]-[day padding:zero] [hour]:[minute]:[second]"
-    ));
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::ERROR) // 设置最大日志级别为INFO
-        .with_timer(timer)
-        .pretty()
-        .with_ansi(false)
-        .finish();
+    //初始化命令行工具
+    let cmd = get_cmd();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let matches = cmd.get_matches();
+    let subcmd = matches.subcommand();
+    match subcmd {
+        Some(("run", subcmd)) => {
+            //注册日志
+            let timer = LocalTime::new(format_description!(
+                "[year]-[month padding:zero]-[day padding:zero] [hour]:[minute]:[second]"
+            ));
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(Level::ERROR) // 设置最大日志级别为INFO
+                .with_timer(timer)
+                .pretty()
+                .with_ansi(false)
+                .finish();
+
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("setting default subscriber failed");
+
+            //注册系统代理
+            if subcmd.get_flag("sys") {
+                let port = CONFIG.port;
+                let addr = format!("127.0.0.1:{}", port);
+                proxy::set_system_proxy(true, addr.as_str(), "")
+                    .map_err(|e| e.to_string())
+                    .unwrap();
+                println!("设置系统代理成功");
+            }
+            run_server().await
+        }
+        Some(("cagen", subcmd)) => {
+            let dir = subcmd.get_one::<String>("DIR").unwrap();
+            rcgen_ca::ca_gen(dir);
+        }
+        Some((c, _)) => println!("unknown option {c}"),
+        None => {
+            println!("unknown option")
+        }
+    }
+
     run_server().await
 }
 #[tokio::test]
 async fn test() {
+    //初始化环境变量
+    // dotenv::dotenv().ok();
+
     // let a = mini_match("a.b.c", "a.b.c");
     // println!("{}", a)
     let res = HTTP_CLIENT
@@ -341,8 +365,8 @@ async fn test() {
         )
         .await
         .unwrap();
-    println!("headers:{:#?}",res.headers());
-    println!("{}","");
+    println!("headers:{:#?}", res.headers());
+    println!("{}", "");
     let body = res.collect().await.unwrap();
     let body: String = String::from_utf8(body.to_bytes().to_vec()).unwrap();
     // let body = String::from_utf8(body.to_vec()).unwrap();

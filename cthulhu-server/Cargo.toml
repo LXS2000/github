@@ -54,7 +54,7 @@ futures = "0.3.29"
 
 
 local-ip-address = "0.5.6"
-
+clap = "4.4.11"
 
 thiserror = "1.0.30"
 tracing = "0.1.40"

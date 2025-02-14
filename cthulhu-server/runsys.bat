@@ -1,6 +1,6 @@
 @echo off
 rem 启动第一个可执行文件
-start "" "cthulhu.exe" "run" 
+start "" "cthulhu.exe" "run" "-s"
 rem 启动第二个可执行文件
 start "" "mitm.exe"
 
